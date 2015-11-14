@@ -1,0 +1,202 @@
+# CSAW Finals 2015 - Cookie Maze 
+
+Ok first things first, we are given a simple Mach-O 64-bit executable. Running the program gives us: 
+
+Thread created successfully[2] 19959 segmentation fault  ./cookie_maze
+
+So we spin this up with LLDB and attempt to find out what is happening and why it is crashing. It exits with code 45. So inside the debugger the crash is not happening so lets open this up in IDA. We see the binary is stripped, so lets take a look at the imported functions and strings. A few of the more interesting ones are listed below.
+
+
+MALLOC ERROR
+thread_get_state():
+read_mem() failed with message %s!
+EXC_BREAKPOINT
+EXC_BAD_ACCESS
+EXC_BAD_INSTRUCTION
+EXC_ARITHMETIC
+EXC_EMULATION
+EXC_SOFTWARE
+EXC_SYSCALL
+EXC_MACH_SYSCALL
+EXC_RPC_ALERT
+EXC_CRASH
+EXC_RESOURCE
+EXC_GUARD
+Exception Received: %s
+task_for_pid() failed:
+mach_port_allocate() failed:
+mach_port_insert_right() failed:
+task_set_exception_ports() failed:
+
+
+Ok so looking through this we see a lot of what appears to be exceptions and some other odd functions. After some googling you may have come across a blog post or two. One interesting one for me was https://www.mikeash.com/pyblog/friday-qa-2013-01-11-mach-exception-handlers.html. 
+
+After reading through this we can see that there very well may be an exception handler registered in this code. Another thing to look at when trying to see where this program is doing its work is the function pthread_create. This is obviously used to create threads and do work based off of them. Following where that is in IDA we are led to this 0x0100003780. 
+
+
+  if ( 50 * counter - 72 <= 2472 )
+  {
+    LODWORD(v6) = sub_100002720(a3);
+    LODWORD(v7) = sub_100002530(a3, v6, 15000LL);
+    LODWORD(v8) = sub_1000025F0(v7);
+    LODWORD(v9) = sub_100003630(a4);
+    LODWORD(v10) = sub_1000024B0(a2);
+    new_state = v10;
+    sub_1000024A0(v10);
+    *((_QWORD *)new_state + 16) = sub_100003BE0;
+    thread_set_state(a2, 4, new_state, 0x2Au);
+    sub_1000024A0(new_state);
+    v12 = *(_QWORD *)new_state + 49;
+    v13 = counter++;
+    *(_BYTE *)(data_buffer + v13) = v12;
+    thread_terminate(a2);
+    if ( hex_array[counter % 15] == *(_BYTE *)(v8 + counter % 15) )
+    {
+      if ( counter % 3 )
+      {
+        if ( counter % 4 )
+        {
+          if ( counter % 5 )
+          {
+            if ( counter % 6 )
+            {
+              if ( counter % 7 )
+                pthread_create(&v19, 0LL, sub_100003DE0, (void *)6);
+              else
+                pthread_create(&v19, 0LL, sub_100003220, (void *)6);
+      
+      ...
+      
+      }
+    }
+    else if ( hex_array[counter % 15] <= (signed int)*(_BYTE *)(v8 + counter % 15) )
+    {
+      counter += 40;
+      pthread_create(&v19, 0LL, sub_100003BE0, (void *)6);
+    }
+    else
+    {
+      pthread_create(&v19, 0LL, sub_100003BE0, (void *)6);
+    }
+
+    ...
+
+        v26 = 5;
+  }
+  else
+  {
+    v26 = 5;
+  }
+  return v26;
+
+
+
+Basically what this code is doing is checking to see if the counter variable is greater than 48 and if it returns 5. If not, it goes through and terminates the current thread and then creates a new thread with one of these functions. Another interesting note here is *(_BYTE *)(data_buffer + v13) = v12;. This looks like it is attempting to write to some memory; maybe our flag. So now I would go ahead and look at one of these functions that will get called from the handler. The code for one of the functions is below.
+
+
+__int64 __fastcall sub_100003CC0(void *a1)
+{
+  signed int v1;  // eax@2
+  size_t v2;      // rax@3
+  __int64 *v3;    // rdx@3
+  int v5;         // [sp+28h] [bp-418h]@1
+  char v6;        // [sp+30h] [bp-410h]@3
+  __int64 v7;     // [sp+438h] [bp-8h]@1
+
+  v7 = *__stack_chk_guard_ptr[0];
+  v5 = 0;
+  do
+    v1 = v5++;
+  while ( v1 < (signed int)a1 );
+  v2 = strlen(asc_100008430);
+  sub_1000018F0(asc_100008430, &v6, v2, 1LL);
+  v3 = __stack_chk_guard_ptr[0];
+  *(_DWORD *)v5 = 0;
+  return *v3;
+}
+
+
+It should be relatively clear that at the bottom of this function it is dereferencing an integer value and attempting to write to it. This will most definitely cause a seg fault and thus call our exception handler again leading to a change in control flow. If we go off the hunch that our flag is being written to with the counter in the function above, then we should have enough to solve the challenge. All we would need to do is read the memory of the application at exit time and we should be able to see the flag. I used a couple different scripts to do this - 
+1) https://github.com/gdbinit/readmem/tree/master/readmem 2) https://github.com/blankwall/CSAW_2015/blob/master/get_base.c
+
+An intersting thing to note here is the fact that there are no breakpoints allowed in this binary due to the fact that there is an exception handler registered. Any exception would first be handed off to the binaries exception handler and not to LLDB's exception handler. This is obviously going to cause problems when in comes to attempting to read this flag. 
+
+Now the last step needed is to hold the program from closing when it finishes so we can read memory. In our previous function we see it is always returning 5. With a little research it shows us that KERN_FAILURE is defined as 5. Patching this to KERN_SUCCESS should put us into an infnite loop allowing us to read memory and get the flag. 
+
+    v26 = 5;
+  }
+  else
+  {
+    v26 = 0;
+  }
+  return v26;
+
+Making this change we can see the binary hanging in an infinite loop and not exiting. Now reading out the flag gives us:
+
+
+➜  Downloads  pgrep my_cook
+21348
+
+➜  Downloads  sudo ./get_base 21348
+Base Address: 0x10ffaa000
+
+➜  Downloads  sudo ./read_mem -p 21205 -a 0x10f433430 -s 100 | grep f
+Readmem v0.6 - (c) 2012, 2013 fG!
+0x10f433430   66 6c 61 67 7b 11 69 00 00 00 00 00 00 00 00 00   |flag{.i.........|
+
+
+So we see the flag in memory but it simply is not filled in with anything. This leads us back into investigation. The first place I would look is back into the main function that handles all of the control flow bringing us back to this line:
+
+    if ( hex_array[counter % 15] == *(_BYTE *)(v8 + counter % 15) )
+
+This is doing a comparison of some value given from a function and comparing it against a 16 byte hex array. Checking where this value is given we see:
+
+  target_task = a1;
+  address = a2;
+  v8 = a3;
+  error_value = mach_vm_read(a1, a2, a3, &data, &dataCnt);
+  if ( error_value )
+  {
+    v3 = mach_error_string(error_value);
+    printf("read_mem() failed with message %s!\n", v3);
+    exit(0);
+  }
+  return data;
+
+
+Which appears to being reading memory and then that return value is passed here:
+
+  v7 = *__stack_chk_guard_ptr[0];
+  v5 = -3666055346812523827LL;
+  v6 = 1368777364550718506LL;
+  v3 = malloc(0x10uLL);
+  sub_100002270((__int64)&v4);
+  sub_1000022F0((__int64)&v4, a1, 0x3A98uLL);
+  sub_100002390((__int64)&v4, (__int64)v3);
+  v1 = memcmp(&v5, v3, 0x10uLL) == 0;
+  sub_100000AA0(v3, 16LL);
+  result = v3;
+  if ( *__stack_chk_guard_ptr[0] == v7 )
+    result = v3;
+  return result;
+
+  Which without a ton of reversing appears to be some sort of hash. With a little inference we can conclude that this is reading memory from the text segment of the binary and hashing its value comparing it to a known hash. In other words it is getting a checksum and checking for binary modification. So rather than attempting to solve this problem lets just go ahead and patch this out and read our flag! Patching the binary to JZ instead of JNZ (bin 85 to 84) allows us to calculate the proper flag and the final output of read_mem is below. Hope you enjoyed the challenge!
+
+
+➜  Downloads  sudo ./readmem -p 21404 -a 0x1006b6430 -s 110
+---------------------------------
+Readmem v0.6 - (c) 2012, 2013 fG!
+---------------------------------
+
+Memory protection: rw-/rwx
+0x1006b6430 66 6c 61 67 7b 51 69 32 39 61 38 35 69 35 32 61 |flag{Qi29a85i52a|
+0x1006b6440 41 35 69 35 45 61 31 35 69 38 31 61 4d 35 69 35 |A5i5Ea15i81aM5i5|
+0x1006b6450 51 61 31 38 69 35 31 61 59 35 7d 00 5d 61 31 35 |Qa18i51aY5}.]a15|
+0x1006b6460 69 32 38 00 00 00 00 00 00 00 00 00 00 00 00 00 |i28.............|
+
+
+
+
+
+
+ 
